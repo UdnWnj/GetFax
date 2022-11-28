@@ -1,0 +1,135 @@
+using Bricom.DataAccess;
+using Bricom.Entity.Request;
+using Bricom.Entity.Request.Comm;
+using Bricom.Entity.SqlServer;
+using ComFunction;
+using Quartz;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using TaskJob.Comm;
+
+namespace TaskJob.Task
+{
+    /// <summary>
+    /// 接收傳真任務 實現IJob介面
+    /// </summary>
+    public class ReceiveFaxTaskJob : IJob
+    {
+        #region 輔助函數
+        /// <summary>
+        /// 已讀取列表
+        /// </summary>
+        public static List<string> GetRegFileDownloadList(string DownloadRegFileName)
+        {
+            List<string> _emailDownloadList = new List<string>();
+            var filePath = Path.Combine(Path.GetDirectoryName(ToolsHelper.AppConfigFilePath), $"{DownloadRegFileName}.txt");
+            ToolsHelper.GetPath(Path.GetDirectoryName(filePath));
+            if (File.Exists(filePath))
+            {
+                List<string> infolist = null;
+                infolist = File.ReadAllLines(filePath, System.Text.Encoding.UTF8).ToList();
+                //移除空行
+                infolist.RemoveAll(item => string.IsNullOrWhiteSpace(item));
+                //移除注釋行
+                infolist.RemoveAll(item => "#".Equals(item.Substring(0, 1)));
+                //添加傳真登記列表
+                _emailDownloadList.AddRange(infolist);
+            }
+            return _emailDownloadList;
+        }
+
+        /// <summary>
+        /// 追加已讀取列表
+        /// </summary>
+        public static void AddRegFileDownloadList(string DownloadRegFileName, string path)
+        {
+
+            var filePath = Path.Combine(Path.GetDirectoryName(ToolsHelper.AppConfigFilePath), $"{DownloadRegFileName}.txt");
+            ToolsHelper.GetPath(Path.GetDirectoryName(filePath));
+            //寫已接收登記文件
+            ToolsHelper.WriteFile(filePath, path, Environment.NewLine, System.Text.Encoding.UTF8, true);
+        }
+        #endregion
+
+        #region IJob 成員
+        public void Execute(IJobExecutionContext context)
+        {
+            Work();
+        }
+
+        /// <summary>
+        /// 工作
+        /// </summary>
+        public static void Work()
+        {
+            if (!"1".Equals(ToolsHelper.GetConfig_CustomSettingsAttrValue("ReceiveFaxJob", "Enable", "0")))
+            {
+                //TaskJobHelper.logger.Info("【ReceiveFaxTaskJob】接收傳真任務 未啟用");
+                return;
+            }
+            ////驗證許可
+            //if (!ToolsHelper.CheckLicense())
+            //{
+            //    return;
+            //}
+
+            //判斷任務是否空閒
+            if (TaskJobHelper.ReceiveFaxIsBusy)
+            {
+                ToolsHelper.OutLogInfo("接收傳真任務忙，等待下次執行！");
+                return;
+            }
+            ToolsHelper.OutLogInfo("執行接收傳真任務");
+            try
+            {
+                string SourceRootFilePath = ToolsHelper.GetConfig_CustomSettingsAttrValue("ReceiveFaxJob", "SourceRootFilePath");
+                string TargetRootFilePath= ToolsHelper.GetConfig_CustomSettingsAttrValue("ReceiveFaxJob", "TargetRootFilePath");
+                TaskJobHelper.ReceiveFaxIsBusy = true;
+                string error = string.Empty;
+                //TaskJobHelper.logger.Info("【ReceiveFaxTaskJob】接收傳真任務 運行開始");
+                var FaxDownloadList = GetRegFileDownloadList("FaxDownloadList");
+                var FaxAllFile = ToolsHelper.GetAllFilesInDirectory(SourceRootFilePath);
+                FaxAllFile.ForEach(item=> {
+                    //chulibucunzaide chuanzhen
+                   if(! FaxDownloadList.Exists(filePath => { return item.FullName.Equals(filePath); }))
+                    {
+                        string targetFilePath = Path.Combine(TargetRootFilePath, Path.GetFileName(item.FullName));
+                        if (ToolsHelper.CopyFileTo(item.FullName, targetFilePath, ref error))
+                        {
+                             new t_bus_dispatch
+                            {
+                                UUID = ToolsHelper.GetFormCode() + ToolsHelper.GetRandomNString(1),
+                                path = targetFilePath,
+                                type = 3,
+                                create_time = DateTime.Now,
+                                dis_status = 1
+
+                            }.Insert();
+                            AddRegFileDownloadList("FaxDownloadList", item.FullName);
+                            FaxDownloadList.Add(item.FullName);
+                        }
+                        else
+                        {
+                            ToolsHelper.OutLogInfo($"{error}", ToolsHelper.LogLevelInfo.Error);
+                        }
+                    }                
+                });
+               
+                //TaskJobHelper.logger.Info("【ReceiveFaxTaskJob】接收傳真任務 運行結束");
+            }
+            catch (Exception ex)
+            {
+                ToolsHelper.OutLogInfo($"【ReceiveFaxTaskJob】接收傳真任務異常：{ex.Message}", ToolsHelper.LogLevelInfo.Error);
+            }
+            finally
+            {
+                TaskJobHelper.ReceiveFaxIsBusy = false;
+                ToolsHelper.FlushMemory();
+            }
+        }
+
+        #endregion
+    }
+}
